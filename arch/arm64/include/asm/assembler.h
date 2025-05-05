@@ -285,11 +285,11 @@ alternative_cb_end
  * raw_dcache_line_size - get the minimum D-cache line size on this CPU
  * from the CTR register.
  */
-	.macro	raw_dcache_line_size, reg, tmp
-	mrs	\tmp, ctr_el0			// read CTR
-	ubfm	\tmp, \tmp, #16, #19		// cache line size encoding
-	mov	\reg, #4			// bytes per word
-	lsl	\reg, \reg, \tmp		// actual cache line size
+	.macro	raw_dcache_line_size, reg, tmp		// reg: output, tmp: 계산용 임시 레지스터
+	mrs	\tmp, ctr_el0							// read CTR
+	ubfm	\tmp, \tmp, #16, #19				// cache line size encoding, tmp = tmp[19:16]
+	mov	\reg, #4								// bytes per word
+	lsl	\reg, \reg, \tmp						// actual cache line size, reg = 4 << tmp
 	.endm
 
 /*

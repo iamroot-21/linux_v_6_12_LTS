@@ -89,15 +89,17 @@ void __init map_range(u64 *pte, u64 start, u64 end, u64 pa, pgprot_t prot,
 
 asmlinkage u64 __init create_init_idmap(pgd_t *pg_dir, pteval_t clrmask)
 {
-	u64 ptep = (u64)pg_dir + PAGE_SIZE;
-	pgprot_t text_prot = PAGE_KERNEL_ROX;
-	pgprot_t data_prot = PAGE_KERNEL;
+	u64 ptep = (u64)pg_dir + PAGE_SIZE;		// 다음 페이지 주소
+	pgprot_t text_prot = PAGE_KERNEL_ROX;	// text 속성, 읽기/실행
+	pgprot_t data_prot = PAGE_KERNEL;		// data 속성, 읽기/쓰기
 
 	pgprot_val(text_prot) &= ~clrmask;
 	pgprot_val(data_prot) &= ~clrmask;
 
+	// pg_dir에 _stext ~ __initdata_begin까지 맵핑
 	map_range(&ptep, (u64)_stext, (u64)__initdata_begin, (u64)_stext,
 		  text_prot, IDMAP_ROOT_LEVEL, (pte_t *)pg_dir, false, 0);
+	// pg_dir에 __initdata_begin ~ _end까지 맵핑
 	map_range(&ptep, (u64)__initdata_begin, (u64)_end, (u64)__initdata_begin,
 		  data_prot, IDMAP_ROOT_LEVEL, (pte_t *)pg_dir, false, 0);
 

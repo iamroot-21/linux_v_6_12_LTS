@@ -142,22 +142,25 @@ SYM_FUNC_END(dcache_clean_pou)
  *	- start   - kernel start address of region
  *	- end     - kernel end address of region
  */
+//     X0 —------------------------- x1
+// | —-----|---------|-----------|---------|
+// | cviac | ivac    | ivac      | civac   |
 SYM_FUNC_START(__pi_dcache_inval_poc)
-	dcache_line_size x2, x3
-	sub	x3, x2, #1
+	dcache_line_size x2, x3	// x2 = dcache_size
+	sub	x3, x2, #1			// x3 = x2 - 1
 	tst	x1, x3				// end cache line aligned?
-	bic	x1, x1, x3
-	b.eq	1f
+	bic	x1, x1, x3			// x1 = x1 & (~x3)
+	b.eq	1f				// if aligned, jump to 1
 	dc	civac, x1			// clean & invalidate D / U line
-1:	tst	x0, x3				// start cache line aligned?
-	bic	x0, x0, x3
-	b.eq	2f
+1:	tst	x0, x3				// start cache line aligned? z = x0 & x3
+	bic	x0, x0, x3			// x0 &= (~x3)
+	b.eq	2f				// if aligned, jump to 2
 	dc	civac, x0			// clean & invalidate D / U line
 	b	3f
 2:	dc	ivac, x0			// invalidate D / U line
-3:	add	x0, x0, x2
-	cmp	x0, x1
-	b.lo	2b
+3:	add	x0, x0, x2			// x0 = x0 + x2
+	cmp	x0, x1				// compare x0, x1
+	b.lo	2b				// if x0 < x1, go to 2
 	dsb	sy
 	ret
 SYM_FUNC_END(__pi_dcache_inval_poc)
