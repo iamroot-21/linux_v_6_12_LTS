@@ -450,12 +450,29 @@ SYM_FUNC_END(idmap_kpti_install_ng_mappings)
  */
 	.pushsection ".idmap.text", "a"
 SYM_FUNC_START(__cpu_setup)
+	// 가상주소를 물리주소로 변경할때 쓰는 캐시 무효화
+	// vm: virtual machine id
+	// all: 전체, exception level 1 에대해 무효화
 	tlbi	vmalle1				// Invalidate local TLB
+	// dsb: 이전 인스트럭션이 모두 실행된 뒤에 다음을진행
+    // nsh: non sharable. 내 proccessor (cpu) 에서만 이전 인스트럭션의 실행을 완전 대기
 	dsb	nsh
 
+	// CPACR_EL1, Architectural Feature Access Control Register
+	// FPEN: floating point 연산이나 Advanced SIMD 연산시 trap 을 발생시키겠다
+	// 0으로 설정: 여기에 정의된 명령을 실행하면 trap 을 발생시킴
 	msr	cpacr_el1, xzr			// Reset cpacr_el1
 	mov	x1, #1 << 12			// Reset mdscr_el1 and disable
+
+	// MDSCR_EL1: Monitor Debug System Control Register
+	// DCC: Debug Communication Channel
+	// TDCC: 1로 설정시 el0 에서 접근시 trap
 	msr	mdscr_el1, x1			// access to the DCC from EL0
+
+	// linux/arch/arm64/include/asm/assembler.h
+	// PMU: Performance Monitroning Unit
+	// AMU: Activity Monitoring Unit
+	// 버전에 따라서 초기화할 수 있고, 넘어갈 수도 있음
 	reset_pmuserenr_el0 x1			// Disable PMU access from EL0
 	reset_amuserenr_el0 x1			// Disable AMU access from EL0
 
@@ -470,6 +487,7 @@ SYM_FUNC_START(__cpu_setup)
 		     TCR_SHARED | TCR_TG_FLAGS | TCR_KASLR_FLAGS | TCR_ASID16 | \
 		     TCR_TBI0 | TCR_A1 | TCR_KASAN_SW_FLAGS | TCR_MTE_FLAGS
 
+	// 버전 출시 이후 버그 방지 코드
 	tcr_clear_errata_bits tcr, x9, x5
 
 #ifdef CONFIG_ARM64_VA_BITS_52
@@ -485,6 +503,7 @@ alternative_else_nop_endif
 	/*
 	 * Set the IPS bits in TCR_EL1.
 	 */
+	// TCR에 CPU가 지원하는 최대 Physical Address Size와 Kernel이 허용하는 최대 값을 비교해, 더 작은 값을 TCR의 IPS 필드에 설정
 	tcr_compute_pa_size tcr, #TCR_IPS_SHIFT, x5, x6
 #ifdef CONFIG_ARM64_HW_AFDBM
 	/*
@@ -492,18 +511,24 @@ alternative_else_nop_endif
 	 * Hardware dirty bit management is enabled later,
 	 * via capabilities.
 	 */
+	// HAFDBS를 읽어서 CPU에서 HAFDBS 기능이 지우너될 경우, TCR_HA를 1로 설정해 Stage 1 Acces flag update enabled로 설정 
 	mrs	x9, ID_AA64MMFR1_EL1
+
+	// Hardware update of both the Access flag and dirty state is supported in hardware.
+	// http://www.iamroot.org/xe/index.php?mid=Note&document_srl=220765
 	and	x9, x9, ID_AA64MMFR1_EL1_HAFDBS_MASK
-	cbz	x9, 1f
-	orr	tcr, tcr, #TCR_HA		// hardware Access flag update
+	cbz	x9, 1f // 만약 HAFDBS가 0일 경우 1로 분기
+	orr	tcr, tcr, #TCR_HA		// hardware Access flag update, HAFDBS가 1일 경우 TCR_HA 비트 설정
 1:
 #endif	/* CONFIG_ARM64_HW_AFDBM */
-	msr	mair_el1, mair
-	msr	tcr_el1, tcr
+	msr	mair_el1, mair // 기존 초기 설정된 값을 mair_el1에 write
+	msr	tcr_el1, tcr  // tcr : Translation Control Register, 기존 설정된 tcr 값을 tcr_el1 에 write
 
-	mrs_s	x1, SYS_ID_AA64MMFR3_EL1
-	ubfx	x1, x1, #ID_AA64MMFR3_EL1_S1PIE_SHIFT, #4
-	cbz	x1, .Lskip_indirection
+	// Stage 1 Permission Indirection. Indicates support for Permission Indirection at stage 1.
+	// 권한을 PTE 에 저장하지 않고, 간접 테이블(PIR Permission Indireciton Register)을 통해 지정하는 방식
+	mrs_s	x1, SYS_ID_AA64MMFR3_EL1  // ID_AA64MMFR3_EL1 읽어서 
+	ubfx	x1, x1, #ID_AA64MMFR3_EL1_S1PIE_SHIFT, #4  // AA64MMFR3_EL1_S1PIE 값 추출해서 
+	cbz	x1, .Lskip_indirection // AA64MMFR3_EL1_S1PIE이 0일 경우 .Lskip_indirection로 분기
 
 	/*
 	 * The PROT_* macros describing the various memory types may resolve to
@@ -517,7 +542,7 @@ alternative_else_nop_endif
 #define PTE_MAYBE_NG		0
 #define PTE_MAYBE_SHARED	0
 
-	mov_q	x0, PIE_E0
+	mov_q	x0, PIE_E0 
 	msr	REG_PIRE0_EL1, x0
 	mov_q	x0, PIE_E1
 	msr	REG_PIR_EL1, x0
