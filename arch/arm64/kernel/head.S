@@ -195,21 +195,23 @@ SYM_CODE_END(preserve_boot_args)
 	 * for consistency with user tasks and kthreads.
 	 */
 	.macro	init_cpu_task tsk, tmp1, tmp2
+	// sp_el0 이 스택포인터로 쓰라고 만들어놨는데, 리눅스에서 쓸때는 현재 태스크 를 지정
 	msr	sp_el0, \tsk
 
-	ldr	\tmp1, [\tsk, #TSK_STACK]
-	add	sp, \tmp1, #THREAD_SIZE
-	sub	sp, sp, #PT_REGS_SIZE
+	ldr	\tmp1, [\tsk, #TSK_STACK] // tmp1 = tsk->stack
+	add	sp, \tmp1, #THREAD_SIZE // sp = tsk + THREAD_SIZE
+	sub	sp, sp, #PT_REGS_SIZE  // sp -= PT_REGS_SIZE
 
-	stp	xzr, xzr, [sp, #S_STACKFRAME]
-	add	x29, sp, #S_STACKFRAME
+ 	// sp = stack 최상단 struct pt_reg -> u64 stackframe[2]
+	stp	xzr, xzr, [sp, #S_STACKFRAME] // pt_reg->stackframe = {0, 0}
+	add	x29, sp, #S_STACKFRAME  // x29 = &pt_reg->stackframe
 
-	scs_load_current
+	scs_load_current // 보안 기능, 스택 버퍼 오염 방지 기능
 
-	adr_l	\tmp1, __per_cpu_offset
-	ldr	w\tmp2, [\tsk, #TSK_TI_CPU]
-	ldr	\tmp1, [\tmp1, \tmp2, lsl #3]
-	set_this_cpu_offset \tmp1
+	adr_l	\tmp1, __per_cpu_offset  // tmp1 = __per_cpu_offset[NR_CPUS]
+	ldr	w\tmp2, [\tsk, #TSK_TI_CPU]  //  (int32*)tmp2 = tsk->thread_info->cpu
+	ldr	\tmp1, [\tmp1, \tmp2, lsl #3]  // tmp1 = &__per_cpu_offset[cpu]
+	set_this_cpu_offset \tmp1 // TPIDR_EL1/2 = &__per_cpu_offset[cpu]
 	.endm
 
 /*
@@ -218,32 +220,46 @@ SYM_CODE_END(preserve_boot_args)
  *   x0 = __pa(KERNEL_START)
  */
 SYM_FUNC_START_LOCAL(__primary_switched)
-	adr_l	x4, init_task
-	init_cpu_task x4, x5, x6
+	adr_l	x4, init_task // x4 = &init_task 
+	init_cpu_task x4, x5, x6 // TPIDR_EL1/2 레지스터에 적절한 값 Write
 
-	adr_l	x8, vectors			// load VBAR_EL1 with virtual
+	adr_l	x8, vectors			// load VBAR_EL1 with virtual, x8 = vectors
 	msr	vbar_el1, x8			// vector table address
 	isb
 
-	stp	x29, x30, [sp, #-16]!
-	mov	x29, sp
+	/*
+STP <Xt1>, <Xt2>, [<SP>, #<imm>]!
+Sp += imm
+*sp = xt1;
+*(sp + 1) = xt2;
 
-	str_l	x21, __fdt_pointer, x5		// Save FDT pointer
+STP <Xt1>, <Xt2> [<SP>, #<imm>]
+*(sp + imm) = xt1;
+*(sp +imm + 1) = xt2;
+	*/
 
-	adrp	x4, _text			// Save the offset between
-	sub	x4, x4, x0			// the kernel virtual and
-	str_l	x4, kimage_voffset, x5		// physical mappings
+	stp	x29, x30, [sp, #-16]! //   sp -= 2; *(sp) = *x29(frame pointer),*(sp + 1) = x30(return address);
+	mov	x29, sp  // x29 = sp
 
-	mov	x0, x20
-	bl	set_cpu_boot_mode_flag
+	// x21 = bootloader에서 전달한 fdt 주소
+	// per-cpu 인지 확인 해볼 필요는 있을 것 같음
+	// x5 = &__per_cpu_offset[CURRENT_CPU]
+	str_l	x21, __fdt_pointer, x5		// Save FDT pointer  // __fdt_pointer + x5 = x21
+
+	adrp	x4, _text			// Save the offset between , x4 = _text
+	sub	x4, x4, x0			// the kernel virtual and, x4 -= x0(KERNEL_START)
+	str_l	x4, kimage_voffset, x5		// physical mappings, kimage_voffset + x5 = x4;
+
+	mov	x0, x20 // x0 = x20(CPU BOOT 정보)
+	bl	set_cpu_boot_mode_flag  // __boot_cpu_mode에 부팅 정보 저장
 
 #if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
 	bl	kasan_early_init
 #endif
-	mov	x0, x20
-	bl	finalise_el2			// Prefer VHE if possible
-	ldp	x29, x30, [sp], #16
-	bl	start_kernel
+	mov	x0, x20 // x0 = x20 (CPU BOOT 정보)
+	bl	finalise_el2			// Prefer VHE if possible, Virtualization Host  Extension 사용 가능 여부 확인, 필요 시 EL2에서 EL1으로 설정 조정\
+	ldp	x29, x30, [sp], #16  // *x29 = *(sp), *x30 = *(sp + 1) sp += 2
+	bl	start_kernel  // start_kernel 호출 (init.c start_kernel)
 	ASM_BUG()
 SYM_FUNC_END(__primary_switched)
 
@@ -436,12 +452,15 @@ SYM_FUNC_END(__secondary_too_slow)
  * Sets the __boot_cpu_mode flag depending on the CPU boot mode passed
  * in w0. See arch/arm64/include/asm/virt.h for more info.
  */
+ // EL1으로 부팅되었으면 __boot_cpu_mode[1] = 부팅정보,
+// EL2으로 부팅되었으면 __boot_cpu_mode[0] = 부팅정보,
+// set_cpu_boot_mode_flag는 현재 CPU가 cold boot인지, hotplug인지 등의 부트 모드를 저장하며 SMP, suspend/resume 대비 플래그 설정이다
 SYM_FUNC_START_LOCAL(set_cpu_boot_mode_flag)
-	adr_l	x1, __boot_cpu_mode
-	cmp	w0, #BOOT_CPU_MODE_EL2
-	b.ne	1f
-	add	x1, x1, #4
-1:	str	w0, [x1]			// Save CPU boot mode
+	adr_l	x1, __boot_cpu_mode // x1 = &__boot_cpu_mode
+	cmp	w0, #BOOT_CPU_MODE_EL2 // EL2로 부팅되었는지
+	b.ne	1f  // EL2로 부팅되지 않았을 경우
+	add	x1, x1, #4 // x1 = &__boot_cpu_mode[1]
+1:	str	w0, [x1]			// Save CPU boot mode, x1 = w0
 	ret
 SYM_FUNC_END(set_cpu_boot_mode_flag)
 
@@ -478,17 +497,21 @@ SYM_FUNC_END(set_cpu_boot_mode_flag)
  */
 	.section ".idmap.text","a"
 SYM_FUNC_START(__enable_mmu)
-	mrs	x3, ID_AA64MMFR0_EL1
-	ubfx	x3, x3, #ID_AA64MMFR0_EL1_TGRAN_SHIFT, 4
+	mrs	x3, ID_AA64MMFR0_EL1  // x3 = Memory Feature Register 값 읽어옴
+	// Translationn GRANule. 페이지 테이블에서 사용하는 페이지 크기
+	ubfx	x3, x3, #ID_AA64MMFR0_EL1_TGRAN_SHIFT, 4 // x3 = tgran 값을 읽어옴
+	// support 하지 않는 크기면 점프
 	cmp     x3, #ID_AA64MMFR0_EL1_TGRAN_SUPPORTED_MIN
 	b.lt    __no_granule_support
 	cmp     x3, #ID_AA64MMFR0_EL1_TGRAN_SUPPORTED_MAX
 	b.gt    __no_granule_support
-	phys_to_ttbr x2, x2
-	msr	ttbr0_el1, x2			// load TTBR0
-	load_ttbr1 x1, x1, x3
 
-	set_sctlr_el1	x0
+	phys_to_ttbr x2, x2  // init_idmap_pg_dir ttbr 타입으로 변환. 초기 부팅때 쓰는 pg_dir
+	msr	ttbr0_el1, x2			// load TTBR0, ttbr0_e1 에 설정.
+	load_ttbr1 x1, x1, x3 // reserved_pg_dir ttbr1_e11. 커널에서 사용하기 위한 pg_dir
+
+	// proc.S mov_q x0, INIT_SCTLR_EL1_MMU_ON
+	set_sctlr_el1	x0  // mmu 켜짐을 설정
 
 	ret
 SYM_FUNC_END(__enable_mmu)
@@ -516,13 +539,14 @@ SYM_FUNC_START(__cpu_secondary_check52bitva)
 SYM_FUNC_END(__cpu_secondary_check52bitva)
 #endif
 
+// 커널이 실행되지 못하도록 막아둠
 SYM_FUNC_START_LOCAL(__no_granule_support)
 	/* Indicate that this CPU can't boot and is stuck in the kernel */
 	update_early_cpu_boot_status \
 		CPU_STUCK_IN_KERNEL | CPU_STUCK_REASON_NO_GRAN, x1, x2
 1:
 	wfe
-	wfi
+	wfi // 인터럽트 걸릴때까지 대기
 	b	1b
 SYM_FUNC_END(__no_granule_support)
 
@@ -531,14 +555,14 @@ SYM_FUNC_START_LOCAL(__primary_switch)
 	adrp	x2, init_idmap_pg_dir
 	bl	__enable_mmu
 
-	adrp	x1, early_init_stack
-	mov	sp, x1
-	mov	x29, xzr
-	mov	x0, x20				// pass the full boot status
+	adrp	x1, early_init_stack // x1 = &early_init_stack
+	mov	sp, x1 // sp = x1
+	mov	x29, xzr // x29 = 0
+	mov	x0, x20				// pass the full boot status, x0 = x20 
 	mov	x1, x21				// pass the FDT
 	bl	__pi_early_map_kernel		// Map and relocate the kernel
 
-	ldr	x8, =__primary_switched
+	ldr	x8, =__primary_switched // x8 = &__primary_switched
 	adrp	x0, KERNEL_START		// __pa(KERNEL_START)
-	br	x8
+	br	x8 // call __primary_switched
 SYM_FUNC_END(__primary_switch)

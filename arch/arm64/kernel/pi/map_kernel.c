@@ -194,44 +194,48 @@ static void __init remap_idmap_for_lpa2(void)
 static void __init map_fdt(u64 fdt)
 {
 	static u8 ptes[INIT_IDMAP_FDT_SIZE] __initdata __aligned(PAGE_SIZE);
-	u64 efdt = fdt + MAX_FDT_SIZE;
+	u64 efdt = fdt + MAX_FDT_SIZE; 
 	u64 ptep = (u64)ptes;
 
 	/*
 	 * Map up to MAX_FDT_SIZE bytes, but avoid overlap with
 	 * the kernel image.
 	 */
+    // fdt 주소를 efdt와 _text 중 작은 값으로 init_idmap_pg_dir에 맵핑핑
 	map_range(&ptep, fdt, (u64)_text > fdt ? min((u64)_text, efdt) : efdt,
 		  fdt, PAGE_KERNEL, IDMAP_ROOT_LEVEL,
 		  (pte_t *)init_idmap_pg_dir, false, 0);
 	dsb(ishst);
 }
 
+// x0 = cpu 부팅정보, x1 = &fdt
 asmlinkage void __init early_map_kernel(u64 boot_status, void *fdt)
 {
-	static char const chosen_str[] __initconst = "/chosen";
+	static char const chosen_str[] __initconst = "/chosen";  // dts 의 chosen 노드 이름
 	u64 va_base, pa_base = (u64)&_text;
 	u64 kaslr_offset = pa_base % MIN_KIMG_ALIGN;
 	int root_level = 4 - CONFIG_PGTABLE_LEVELS;
 	int va_bits = VA_BITS;
 	int chosen;
 
-	map_fdt((u64)fdt);
+	map_fdt((u64)fdt); //  fdt identity mapping
 
 	/* Clear BSS and the initial page tables */
+    // bss 영역 0으로 초기화, (init_pg_start - init_pg_end) 0으로 초기화
 	memset(__bss_start, 0, (u64)init_pg_end - (u64)__bss_start);
 
 	/* Parse the command line for CPU feature overrides */
-	chosen = fdt_path_offset(fdt, chosen_str);
-	init_feature_override(boot_status, fdt, chosen);
+	chosen = fdt_path_offset(fdt, chosen_str); // chosen 노드의 offset
+	init_feature_override(boot_status, fdt, chosen); // chosen 노드의 bootargs 프로퍼티를 바탕으로 CPU 기능 오버라이드 값을 초기화
 
 	if (IS_ENABLED(CONFIG_ARM64_64K_PAGES) && !cpu_has_lva()) {
 		va_bits = VA_BITS_MIN;
 	} else if (IS_ENABLED(CONFIG_ARM64_LPA2) && !cpu_has_lpa2()) {
 		va_bits = VA_BITS_MIN;
 		root_level++;
-	}
+	} // CONFIG 설정에 따라 va_bits 설정
 
+    // TCR_EL1 (TTBR 컨트롤 레지스터) 설정 변경 및 T1SZ 필드를 설정하여 상위 VA 영역 크기 조정
 	if (va_bits > VA_BITS_MIN)
 		sysreg_clear_set(tcr_el1, TCR_T1SZ_MASK, TCR_T1SZ(va_bits));
 
@@ -242,6 +246,7 @@ asmlinkage void __init early_map_kernel(u64 boot_status, void *fdt)
 	 * take the low bits of the KASLR offset from the physical address, and
 	 * fill in the high bits from the seed.
 	 */
+    // RANDOMIZE_BASE가 설정되었을 경우, kalsr 을 통해 커널을 가장주소에 배치할 offset 생성
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
 		u64 kaslr_seed = kaslr_early_init(fdt, chosen);
 
@@ -250,10 +255,11 @@ asmlinkage void __init early_map_kernel(u64 boot_status, void *fdt)
 
 		kaslr_offset |= kaslr_seed & ~(MIN_KIMG_ALIGN - 1);
 	}
-
+    // 만약 LPA2 (Large Physical Address Extension 2)를 지원할 경우 lpa2로 다시 identity 맵핑
 	if (IS_ENABLED(CONFIG_ARM64_LPA2) && va_bits > VA_BITS_MIN)
 		remap_idmap_for_lpa2();
-
+ 
 	va_base = KIMAGE_VADDR + kaslr_offset;
+    // map_kernel 을 호출해 커널 물리주소를 가상주소로 맵핑
 	map_kernel(kaslr_offset, va_base - pa_base, root_level);
 }
